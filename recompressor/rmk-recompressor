@@ -1,0 +1,187 @@
+#!/usr/bin/perl
+# ===========================================================================
+#
+#  rmk-recompressor -- Designed to recompress Android APK and JAR files,
+#                      excluding the appropriate file types from compression, 
+#                      to function properly with zipalign.
+#
+#  Usage: rmk-recompressor [OPTIONS] <File1> [File2] [File3] ...
+#
+#  Rafi Khardalian <rmk|at|roobix.net> -- Wed Jun 22 23:34:55 PDT 2011
+#
+# ===========================================================================
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# ===========================================================================
+
+use strict;
+
+use Getopt::Long qw(:config bundling);
+use File::Basename;
+use File::Temp;
+use File::Path;
+use File::Copy;
+use Cwd;
+
+my %opts;
+GetOptions(\%opts,
+    'debug|d',
+    'compression|c=i',
+    'overwrite|o',
+    'help|h'
+) || die("ERROR: Invalid options");
+
+usage() if ((exists $opts{help}) or (scalar @ARGV < 1));
+$opts{compression} = 6 unless (exists $opts{compression});
+
+my $no_comp_ext = ".jpg:.jpeg:.png:.gif:.wav:.mp2:.mp3:.ogg:.aac:.mpg:.mpeg:"
+                . ".mid:.midi:.smf:.jet:.rtttl:.imy:.xmf:.mp4:.m4a:.m4v:.3gp:"
+                . ".3gpp:.3g2:.3gpp2:.amr:.awb:.wma:.wmv:.qtc:.r10:.m10";
+
+my $pwd = cwd();
+my $tempdir;
+my $temp_template = "/tmp/rmktmp.XXXXXXXXXX";
+
+for my $file (@ARGV)
+{
+    chdir($pwd);
+    unless ((-f $file) or (-d $file))
+    {
+        print "Skipping $file ... does not exist.\n";
+        next;
+    }
+
+    my $file_bn = basename($file);
+    my $dest_file = $pwd . "/" . $file;
+
+    print "Processing $file_bn";
+
+    if (-d $file)
+    {
+        print " (dir):\n";
+        if ($file_bn !~ m/\.(jar|apk)$/i)
+        {
+            $dest_file .= ".zip";
+            print "\tUnknown type, using zip extension.\n"
+        }
+
+        if ((-e $dest_file) and (not exists $opts{overwrite}))
+        {
+            print "\tSkipping.\n";
+            print "\tDestination file exits, either remove or use overwrite.\n";
+            next;
+        }
+
+        chdir($file);
+    }
+
+    if (-f $file)
+    {
+        print ":\n";
+        print "\tDecompressing ... ";
+
+        $tempdir = File::Temp::tempdir($temp_template);
+        my $unzip_cmd = "unzip -d $tempdir $file";
+        my $unzip_result = `$unzip_cmd 2>&1`;
+
+        if ($? > 0)
+        {
+            print "failed.\n";
+            $unzip_result =~ s/\n/\n\t/g;
+            print "\t$unzip_result\n";
+
+            File::Path::rmtree($tempdir);
+            next;
+        }
+        else
+        {
+            print "done.\n";
+        }
+
+        chdir($tempdir);
+    }
+
+    print "\tCompressing ... ";
+
+    my $zip_cmd = "zip -$opts{compression} -rmn $no_comp_ext $dest_file *";
+    my $zip_result = `$zip_cmd 2>&1`;
+
+    chdir($pwd);
+    File::Path::rmtree($tempdir);        
+
+    if ($? > 0)
+    {
+        print "failed.\n";
+        $zip_result =~ s/\n/\n\t/g;
+        print "\t$zip_result\n";
+
+        next;
+    }
+    else
+    {
+        print "done.\n";
+    }
+
+    print "\tZipaligning ... ";
+
+    my $tempfile = File::Temp::mktemp($temp_template);
+    my $align_cmd = "zipalign 4 $dest_file $tempfile";
+    my $align_result = `$align_cmd 2>&1`;
+
+    if ($? > 0)
+    {
+        print "failed.\n";
+        unlink($tempfile);
+    }
+    else
+    {
+        print "done.\n";
+        File::Copy::move($tempfile, $dest_file);
+    }
+}
+
+
+sub usage
+{
+    print STDERR (<<EOF);
+
+rmk-recompressor -- Designed to recompress Android APK and JAR files, excluding
+                    the appropriate file types from compression, to function
+                    properly with zipalign.
+
+Usage: rmk-recompressor [OPTIONS] <File1> [File2] [File3] ...
+
+    -c, --compression <0-8>
+            Deflate compression level to use. The default value if unspecified
+            is 6 and is generally fine. A value of 0 means do not compress
+            anything, store only.
+
+    -o, --overwrite
+	    Allow overwriting of pre-existing destination files. This option
+            is only relevant when the source list contains an uncompressed
+            directory. In this case, the destination file would be named
+            directory + .zip. By default, the existence of this zip file
+            would cause the file to be skipped.
+
+    -h, --help
+	    This help screen.
+
+Examples:
+
+    rmk-recompressor -c5 /myrom/system/app/*.apk /myrom/system/framework/*.jar
+    rmk-recompressor -c0 Foo.apk Bar.apk
+
+EOF
+    exit 0;
+}
